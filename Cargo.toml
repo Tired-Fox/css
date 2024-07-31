@@ -1,0 +1,17 @@
+[package]
+name = "wml"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+async = ["dep:futures-util"]
+
+[dependencies]
+encoding_rs = "0.8.34"
+futures-util = { version = "0.3.30", optional = true }
+tokio = { version = "1.39.2", features = ["fs", "rt", "rt-multi-thread"] }
+tokio-util = { version = "0.7.11", features = ["codec"] }
+
+[dev-dependencies]
+smol = "2.0.0"
+futures-util = "0.3.30"
