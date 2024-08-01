@@ -52,6 +52,30 @@ fn tokenizer() {
         let stream = Tokenizer::new(reader.bytes().map(|v| v.unwrap()), TokenizerOptions::default());
         println!("{}", stream.collect::<String>());
     }
+
+    // ASYNC
+    #[cfg(feature="async")]
+    { 
+        use smol::{io::{BufReader, AsyncReadExt}, fs::File};
+        use wml::{AsyncTokenizer, TokenizerOptions};
+
+        smol::block_on(async move {
+            let reader = BufReader::new(File::open("examples/sample.css").await.unwrap());
+            let mut stream = AsyncTokenizer::new(reader.bytes().map(|v| v.unwrap()), TokenizerOptions::default());
+
+            println!("\x1b[1;33mASYNC TOKENIZER\x1b[0m:");
+            while let Some(token) = stream.next().await {
+                println!("{:?}", token);
+            }
+
+            let reader = BufReader::new(File::open("examples/sample.css").await.unwrap());
+            let mut stream = AsyncTokenizer::new(reader.bytes().map(|v| v.unwrap()), TokenizerOptions::default());
+            while let Some(token) = stream.next().await {
+                print!("{}", token);
+            }
+            println!()
+        });
+    }
 }
 
 fn main() {

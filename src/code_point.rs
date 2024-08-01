@@ -371,22 +371,44 @@ mod async_code_point {
         /// Peek `N` code points.
         ///
         /// This method will fill the buffer until enough code points exist to peek. If there are not
-        /// enough code points, None is returned. Otherwise, the buffer is sliced for the specified `N`
-        /// code points returning the set sized array.
+        /// enough code points, the missing code points are represented with None.
         ///
         /// Per the specification: `\r`, `\f`, and `\r\n` are replaced with `\n`, and U+0000 (NULL) or
         /// surrogate code points are replaced with U+FFFD REPLACEMENT CHARACTER (�)
-        pub async fn peekn<const N: usize>(&mut self) -> Option<[char;N]> {
+        pub async fn peekn<const N: usize>(&mut self) -> [Option<char>;N] {
             while self.buffer.len() < N {
+                match self.read().await {
+                    Some(chars) => self.buffer.extend(Self::filter_code_points(chars)),
+                    None => break,
+                }
+            }
+
+            let mut result: [Option<char>;N] = [None;N];
+            self.buffer.make_contiguous();
+            for i in 0..N {
+                result[i] = self.buffer.get(i).copied();
+            }
+            return result;
+        }
+
+
+        /// Peek the code point at `N`.
+        ///
+        /// This method will fill the buffer until enough code points exist to peek. If there are not
+        /// enough code points, None is returned. Otherwise, the buffer at the specified index is
+        /// returned.
+        ///
+        /// Per the specification: `\r`, `\f`, and `\r\n` are replaced with `\n`, and U+0000 (NULL) or
+        /// surrogate code points are replaced with U+FFFD REPLACEMENT CHARACTER (�)
+        #[inline]
+        pub async fn peek_at(&mut self, n: usize) -> Option<char> {
+            while self.buffer.len() < n {
                 let chars = self.read().await?;
                 self.buffer.extend(Self::filter_code_points(chars));
             }
 
-            if self.buffer.len() >= N {
-                let mut result: [char;N] = [NULL;N];
-                self.buffer.make_contiguous();
-                result.copy_from_slice(&self.buffer.as_slices().0[..N]);
-                return Some(result);
+            if self.buffer.len() >= n {
+                return self.buffer.get(n).copied();
             }
 
             None
@@ -414,20 +436,52 @@ mod async_code_point {
         /// Per the specification: `\r`, `\f`, and `\r\n` are replaced with `\n`, and U+0000 (NULL) or
         /// surrogate code points are replaced with U+FFFD REPLACEMENT CHARACTER (�)
         #[allow(clippy::should_implement_trait)]
-        pub async fn nextn<const N: usize>(&mut self) -> Option<[char;N]> {
+        pub async fn nextn<const N: usize>(&mut self) -> [Option<char>;N] {
             while self.buffer.len() < N {
-                let chars = self.read().await?;
-                self.buffer.extend(Self::filter_code_points(chars));
+                match self.read().await {
+                    Some(chars) => self.buffer.extend(Self::filter_code_points(chars)),
+                    None => break,
+                }
             }
 
-            if self.buffer.len() >= N {
-                let mut result: [char;N] = [NULL;N];
-                let src = self.buffer.drain(..N).collect::<Vec<_>>();
-                result.copy_from_slice(src.as_slice());
-                return Some(result);
+            let mut result: [Option<char>;N] = [None;N];
+            for i in 0..N {
+                result[i] = self.buffer.pop_front();
             }
+            result
+        }
 
-            None
+        
+        /// Get the next code point. No bounds checking is performed on the buffer.
+        ///
+        /// Per the specification: `\r`, `\f`, and `\r\n` are replaced with `\n`, and U+0000 (NULL) or
+        /// surrogate code points are replaced with U+FFFD REPLACEMENT CHARACTER (�)
+        ///
+        /// # Safety
+        /// This method assumes that the buffer has at least one code point.
+        #[allow(clippy::should_implement_trait)]
+        #[inline]
+        pub(crate) unsafe fn next_unchecked(&mut self) -> char {
+            self.buffer.pop_front().unwrap()
+        }
+
+        /// Get the next `N` code points. No bounds checking is performed on the buffer.
+        ///
+        /// This method will fill the buffer until there are enough code points to return. If there are
+        /// not enough code points, None is returned. Otherwise, the buffer is drained for the
+        /// specified `N` code points returning the set size array.
+        ///
+        /// Per the specification: `\r`, `\f`, and `\r\n` are replaced with `\n`, and U+0000 (NULL) or
+        /// surrogate code points are replaced with U+FFFD REPLACEMENT CHARACTER (�)
+        ///
+        /// # Safety
+        /// This method assumes that the buffer has at least `N` code points.
+        #[inline]
+        pub(crate) unsafe fn nextn_unchecked<const N: usize>(&mut self) -> [char;N] {
+            let mut result: [char;N] = [NULL;N];
+            let src = self.buffer.drain(..N).collect::<Vec<_>>();
+            result[..N].copy_from_slice(&src[..N]);
+            result
         }
     }
 
@@ -435,7 +489,7 @@ mod async_code_point {
     mod tests {
         use super::*;
 
-        macro_rules! stream_from_iter {
+        macro_rules! stream {
             ($($token: tt)*) => {
                 futures_util::stream::iter($($token)*.into_iter()) 
             };
@@ -445,7 +499,7 @@ mod async_code_point {
         fn read_code_points() {
             smol::block_on(async move {
                 let mut stream = AsyncCodePointStream::new(
-                    stream_from_iter!([240u8, 159, 153, 130, 240, 159, 0xDBu8, 0xFFu8, 240, 159, 0xD8u8, 0x00u8, 34, 104, 105, 34]),
+                    stream!([240u8, 159, 153, 130, 240, 159, 0xDBu8, 0xFFu8, 240, 159, 0xD8u8, 0x00u8, 34, 104, 105, 34]),
                     None
                 );
                 assert_eq!(stream.read().await, Some(vec!['\u{1F642}']));
@@ -458,7 +512,7 @@ mod async_code_point {
         #[test]
         fn peek_code_point() {
             smol::block_on(async move {
-                let mut stream = AsyncCodePointStream::new(stream_from_iter!("\u{1F642}@import".bytes()), None);
+                let mut stream = AsyncCodePointStream::new(stream!("\u{1F642}@import".bytes()), None);
                 assert_eq!(stream.peek().await, Some('\u{1F642}'));
                 assert!(stream.buffer.len() == 1);
 
@@ -481,7 +535,7 @@ mod async_code_point {
         #[test]
         fn next_code_point() {
             smol::block_on(async move {
-                let mut stream = AsyncCodePointStream::new(stream_from_iter!("@import".bytes()), None);
+                let mut stream = AsyncCodePointStream::new(stream!("@import".bytes()), None);
                 assert_eq!(stream.next().await, Some('@'));
                 assert_eq!(stream.buffer.len(), 3);
                 assert_eq!(stream.next().await, Some('i'));
@@ -501,26 +555,26 @@ mod async_code_point {
         #[test]
         fn peek_multiple_code_points() {
             smol::block_on(async move {
-                let mut stream = AsyncCodePointStream::new(stream_from_iter!("@import".bytes()), None);
-                assert_eq!(stream.peekn::<3>().await, Some(['@', 'i', 'm']));
+                let mut stream = AsyncCodePointStream::new(stream!("@import".bytes()), None);
+                assert_eq!(stream.peekn::<3>().await, [Some('@'), Some('i'), Some('m')]);
                 assert_eq!(stream.buffer.len(), 4);
-                assert_eq!(stream.peekn::<4>().await, Some(['@', 'i', 'm', 'p']));
-                assert_eq!(stream.peekn::<5>().await, Some(['@', 'i', 'm', 'p', 'o']));
+                assert_eq!(stream.peekn::<4>().await, [Some('@'), Some('i'), Some('m'), Some('p')]);
+                assert_eq!(stream.peekn::<5>().await, [Some('@'), Some('i'), Some('m'), Some('p'), Some('o')]);
                 assert_eq!(stream.buffer.len(), 7);
-                assert_eq!(stream.peekn::<7>().await, Some(['@', 'i', 'm', 'p', 'o', 'r', 't']));
-                assert!(stream.peekn::<8>().await.is_none());
+                assert_eq!(stream.peekn::<7>().await, [Some('@'), Some('i'), Some('m'), Some('p'), Some('o'), Some('r'), Some('t')]);
+                assert_eq!(stream.peekn::<8>().await, [Some('@'), Some('i'), Some('m'), Some('p'), Some('o'), Some('r'), Some('t'), None]);
             })
         }
 
         #[test]
         fn next_multiple_code_points() {
             smol::block_on(async move {
-                let mut stream = AsyncCodePointStream::new(stream_from_iter!("@import".bytes()), None);
-                assert_eq!(stream.nextn::<3>().await, Some(['@', 'i', 'm']));
+                let mut stream = AsyncCodePointStream::new(stream!("@import".bytes()), None);
+                assert_eq!(stream.nextn::<3>().await, [Some('@'), Some('i'), Some('m')]);
                 assert_eq!(stream.buffer.len(), 1);
-                assert_eq!(stream.nextn::<4>().await, Some(['p', 'o', 'r', 't']));
+                assert_eq!(stream.nextn::<4>().await, [Some('p'), Some('o'), Some('r'), Some('t')]);
                 assert_eq!(stream.buffer.len(), 0);
-                assert!(stream.nextn::<2>().await.is_none());
+                assert_eq!(stream.nextn::<2>().await, [None;2]);
             })
         }
     }
