@@ -1,5 +1,6 @@
-mod code_point_stream;
+mod code_point;
+mod token;
 
-pub use code_point_stream::CodePointStream;
+pub use code_point::CodePointStream;
 #[cfg(feature="async")]
-pub use code_point_stream::AsyncCodePointStream;
+pub use code_point::AsyncCodePointStream;
