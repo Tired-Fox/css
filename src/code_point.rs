@@ -130,27 +130,25 @@ impl CodePointStream {
 
     /// Peek `N` code points.
     ///
-    /// This method will fill the buffer until enough code points exist to peek. If there are not
-    /// enough code points, None is returned. Otherwise, the buffer is sliced for the specified `N`
-    /// code points returning the set sized array.
+    /// This method will attempt to fill the buffer with the required number of code points. If not
+    /// enough code points exist, the missing code points are represented with None.
     ///
     /// Per the specification: `\r`, `\f`, and `\r\n` are replaced with `\n`, and U+0000 (NULL) or
     /// surrogate code points are replaced with U+FFFD REPLACEMENT CHARACTER (�)
     #[inline]
-    pub fn peekn<const N: usize>(&mut self) -> Option<[char;N]> {
+    pub fn peekn<const N: usize>(&mut self) -> [Option<char>;N] {
         while self.buffer.len() < N {
-            let chars = self.read()?;
-            self.buffer.extend(Self::filter_code_points(chars));
+            match self.read() {
+                Some(chars) => self.buffer.extend(Self::filter_code_points(chars)),
+                None => break,
+            }
         }
 
-        if self.buffer.len() >= N {
-            let mut result: [char;N] = [Self::NULL;N];
-            self.buffer.make_contiguous();
-            result.copy_from_slice(&self.buffer.as_slices().0[..N]);
-            return Some(result);
+        let mut result: [Option<char>;N] = [None;N];
+        for i in 0..N {
+            result[i] = self.buffer.get(i).copied();
         }
-
-        None
+        result
     }
 
     /// Peek the code point at `N`.
@@ -205,27 +203,25 @@ impl CodePointStream {
     /// Get the next `N` code points.
     ///
     /// This method will fill the buffer until there are enough code points to return. If there are
-    /// not enough code points, None is returned. Otherwise, the buffer is drained for the
-    /// specified `N` code points returning the set size array.
+    /// not enough code points, the missing code points are represented with None.
     ///
     /// Per the specification: `\r`, `\f`, and `\r\n` are replaced with `\n`, and U+0000 (NULL) or
     /// surrogate code points are replaced with U+FFFD REPLACEMENT CHARACTER (�)
     #[allow(clippy::should_implement_trait)]
     #[inline]
-    pub fn nextn<const N: usize>(&mut self) -> Option<[char;N]> {
+    pub fn nextn<const N: usize>(&mut self) -> [Option<char>;N] {
         while self.buffer.len() < N {
-            let chars = self.read()?;
-            self.buffer.extend(Self::filter_code_points(chars));
+            match self.read() {
+                Some(chars) => self.buffer.extend(Self::filter_code_points(chars)),
+                None => break,
+            }
         }
 
-        if self.buffer.len() >= N {
-            let mut result: [char;N] = [NULL;N];
-            let src = self.buffer.drain(..N).collect::<Vec<_>>();
-            result.copy_from_slice(src.as_slice());
-            return Some(result);
+        let mut result: [Option<char>;N] = [None;N];
+        for i in 0..N {
+            result[i] = self.buffer.pop_front();
         }
-
-        None
+        result
     }
 
     /// Get the next `N` code points. No bounds checking is performed on the buffer.
@@ -243,8 +239,16 @@ impl CodePointStream {
     pub(crate) unsafe fn nextn_unchecked<const N: usize>(&mut self) -> [char;N] {
         let mut result: [char;N] = [NULL;N];
         let src = self.buffer.drain(..N).collect::<Vec<_>>();
-        result.copy_from_slice(src.as_slice());
+        result[..N].copy_from_slice(&src[..N]);
         result
+    }
+}
+
+impl Iterator for CodePointStream {
+    type Item = char;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        CodePointStream::next(self)
     }
 }
 
@@ -580,22 +584,22 @@ mod tests {
     #[test]
     fn peek_multiple_code_points() {
         let mut stream = CodePointStream::new("@import".bytes(), None);
-        assert_eq!(stream.peekn::<3>(), Some(['@', 'i', 'm']));
+        assert_eq!(stream.peekn::<3>(), [Some('@'), Some('i'), Some('m')]);
         assert_eq!(stream.buffer.len(), 4);
-        assert_eq!(stream.peekn::<4>(), Some(['@', 'i', 'm', 'p']));
-        assert_eq!(stream.peekn::<5>(), Some(['@', 'i', 'm', 'p', 'o']));
+        assert_eq!(stream.peekn::<4>(), [Some('@'), Some('i'), Some('m'), Some('p')]);
+        assert_eq!(stream.peekn::<5>(), [Some('@'), Some('i'), Some('m'), Some('p'), Some('o')]);
         assert_eq!(stream.buffer.len(), 7);
-        assert_eq!(stream.peekn::<7>(), Some(['@', 'i', 'm', 'p', 'o', 'r', 't']));
-        assert!(stream.peekn::<8>().is_none());
+        assert_eq!(stream.peekn::<7>(), [Some('@'), Some('i'), Some('m'), Some('p'), Some('o'), Some('r'), Some('t')]);
+        assert_eq!(stream.peekn::<8>(), [Some('@'), Some('i'), Some('m'), Some('p'), Some('o'), Some('r'), Some('t'), None]);
     }
 
     #[test]
     fn next_multiple_code_points() {
         let mut stream = CodePointStream::new("@import".bytes(), None);
-        assert_eq!(stream.nextn::<3>(), Some(['@', 'i', 'm']));
-        //assert_eq!(stream.buffer.len(), 1);
-        //assert_eq!(stream.nextn::<4>(), Some(['p', 'o', 'r', 't']));
-        //assert_eq!(stream.buffer.len(), 0);
-        //assert!(stream.nextn::<2>().is_none());
+        assert_eq!(stream.nextn::<3>(), [Some('@'), Some('i'), Some('m')]);
+        assert_eq!(stream.buffer.len(), 1);
+        assert_eq!(stream.nextn::<4>(), [Some('p'), Some('o'), Some('r'), Some('t')]);
+        assert_eq!(stream.buffer.len(), 0);
+        assert_eq!(stream.nextn::<2>(), [None;2]);
     }
 }

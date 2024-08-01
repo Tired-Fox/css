@@ -1,6 +1,6 @@
 use futures_util::StreamExt;
 
-fn main() {
+fn code_point_stream() {
     // SYNC
     {
         use std::{fs::File, io::{BufReader, Read}};
@@ -9,7 +9,7 @@ fn main() {
         let reader = BufReader::new(File::open("examples/sample.css").unwrap());
         let mut stream = CodePointStream::new(reader.bytes().map(|v| v.unwrap()), None);
 
-        println!("\x1b[1;33mSYNC\x1b[0m:");
+        println!("\x1b[1;33mSYNC STREAM\x1b[0m:");
         while let Some(char) = stream.next() {
             print!("{}", char);
         }
@@ -26,11 +26,35 @@ fn main() {
             let reader = BufReader::new(File::open("examples/sample.css").await.unwrap());
             let mut stream = AsyncCodePointStream::new(reader.bytes().map(|v| v.unwrap()), None);
 
-            println!("\x1b[1;33mASYNC\x1b[0m:");
+            println!("\x1b[1;33mASYNC STREAM\x1b[0m:");
             while let Some(char) = stream.next().await {
                 print!("{}", char);
             }
             println!();
         })
     }
+}
+
+fn tokenizer() {
+    { 
+        use std::{fs::File, io::{BufReader, Read}};
+        use wml::{Tokenizer, TokenizerOptions};
+
+        let reader = BufReader::new(File::open("examples/sample.css").unwrap());
+        let stream = Tokenizer::new(reader.bytes().map(|v| v.unwrap()), TokenizerOptions::default());
+
+        println!("\x1b[1;33mSYNC TOKENIZER\x1b[0m:");
+        for token in stream {
+            println!("{:?}", token);
+        }
+
+        let reader = BufReader::new(File::open("examples/sample.css").unwrap());
+        let stream = Tokenizer::new(reader.bytes().map(|v| v.unwrap()), TokenizerOptions::default());
+        println!("{}", stream.collect::<String>());
+    }
+}
+
+fn main() {
+    code_point_stream();
+    tokenizer();
 }

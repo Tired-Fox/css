@@ -1,9 +1,16 @@
 use hashbrown::HashSet;
-use std::borrow::Cow;
+use std::{borrow::Cow, fmt::Display};
 
 use encoding_rs::Encoding;
 
 use super::code_point::CodePointStream;
+
+// Option condition on some
+macro_rules! oc {
+    ($ident: ident; $cond: expr) => {
+        $ident.map(|$ident| $cond).unwrap_or_default() 
+    };
+}
 
 pub trait TokenizeCharHelper {
     fn is_ident_start(self) -> bool;
@@ -30,7 +37,7 @@ impl TokenizeCharHelper for char {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, strum_macros::EnumIs)]
-pub enum NumberType {
+enum NumberType {
     #[default]
     Integer,
     Number,
@@ -40,15 +47,6 @@ pub enum NumberType {
 pub enum NumberValue {
     Integer(i32),
     Number(f32)
-}
-
-impl NumberValue {
-    pub fn from_type(ntype: NumberType, value: Cow<'static, str>) -> Self {
-        match ntype {
-            NumberType::Integer => Self::Integer(value.parse().unwrap_or(0)),
-            NumberType::Number => Self::Number(value.parse().unwrap_or(0.0)),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,7 +69,6 @@ pub enum Token {
     Function(Cow<'static, str>),
     AtKeyword(Cow<'static, str>),
 
-    // NOTE: DONE
     Hash(Cow<'static, str>, HashType),
     String(Cow<'static, str>),
     Url(Cow<'static, str>),
@@ -80,12 +77,10 @@ pub enum Token {
 
     Comment(Cow<'static, str>),
     Whitespace(String),
-    // NOTE: /DONE
 
     Number(Number),
     Percentage(Number),
     Dimension { value: Number, unit: Cow<'static, str> },
-
 
     CDO,
     CDC,
@@ -103,6 +98,41 @@ pub enum Token {
 
     #[allow(clippy::upper_case_acronyms)]
     EOF,
+}
+
+impl Display for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let repr = match self {
+            Self::Ident(value) => value.to_string(),
+            Self::Function(name) => format!("{name}("),
+            Self::AtKeyword(keyword) => format!("@{keyword}"),
+            Self::Hash(hash, _) => hash.to_string(),
+            Self::String(value) => value.to_string(),
+            Self::Url(url) => format!("url({url})"),
+            Self::BadString => "/* Bad String */".to_string(),
+            Self::BadUrl => "/* Bad Url */".to_string(),
+            Self::Comment(comment) => format!("/*{comment}*/"),
+            Self::Whitespace(whitespace) => whitespace.clone(),
+            Self::Number(Number { repr, .. }) => repr.to_string(),
+            Self::Percentage(Number { repr, .. }) => format!("{repr}%"),
+            Self::Dimension { value: Number { repr, .. }, unit } => format!("{repr}{unit}"),
+            Self::CDO => "<!--".to_string(), 
+            Self::CDC => "-->".to_string(),
+            Self::Delim(char) => char.to_string(),
+            Self::Colon => ':'.to_string(),
+            Self::Semicolon => ';'.to_string(),
+            Self::Comma => ','.to_string(),
+            Self::LeftBrace => '['.to_string(),
+            Self::RightBrace => ']'.to_string(),
+            Self::LeftParenthesis => '('.to_string(),
+            Self::RightParenthesis => ')'.to_string(),
+            Self::LeftBracket => '{'.to_string(),
+            Self::RightBracket => '}'.to_string(),
+            Self::EOF => String::new()
+        };
+
+        write!(f, "{}", repr)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -136,96 +166,75 @@ impl Tokenizer {
 
     /// Check if the provided two code points are a valid escape sequence.
     #[inline]
-    pub fn is_valid_escape(code_points: [char; 2]) -> bool {
-        if code_points[0] != '\\' {
-            return false;
-        }
-
-        if code_points[1] == '\n' {
-            return false;
-        }
-
-        true
+    pub fn is_valid_escape(code_points: [Option<char>; 2]) -> bool {
+        let [first, second] = code_points;
+        oc!(first; first == '\\') && oc!(second; second != '\n')
     }
 
     /// Check if the provided three code points are a valid start of an identifier.
     #[inline]
-    pub fn is_start_ident(code_points: [char; 3]) -> bool {
+    pub fn is_start_ident(code_points: [Option<char>; 3]) -> bool {
         let [first, second, third] = code_points;
-        if first.is_ident_start() {
+        if oc!(first; first.is_ident_start()) {
             return true;
         }
-
-        if first == '-' {
-            return second.is_ident_start()
-                || second == '-'
-                || Self::is_valid_escape([second, third]);
+        if oc!(first; first == '-') {
+            return oc!(second; second.is_ident_start()) || oc!(second; second == '-') || Self::is_valid_escape([second, third]);
         }
-
-        if first == '\\' {
+        if oc!(first; first == '\\') {
             return Self::is_valid_escape([first, second]);
         }
-
         false
     }
 
     /// Check if the provided three code points are a valid start of a number.
     #[inline]
-    pub fn is_start_number(code_points: [char; 3]) -> bool {
+    pub fn is_start_number(code_points: [Option<char>; 3]) -> bool {
         let [first, second, third] = code_points;
-        if first == '-' {
-            return second.is_ascii_digit() || (second == '.' && third.is_ascii_digit());
+        if oc!(first; "+-".contains(first)) {
+            return oc!(second; second.is_ascii_digit()) || (oc!(second; second == '.') && oc!(third; third.is_ascii_digit()));
         }
 
-        if first == '.' {
-            return second.is_ascii_digit();
+        if oc!(first; first == '.') {
+            return oc!(second; second.is_ascii_digit());
         }
 
-        first.is_ascii_digit()
+        oc!(first; first.is_ascii_digit())
     }
 
     /// Check if the next two code points are a valid escape sequence from the input stream.
     #[inline]
     pub fn has_valid_escape(&mut self) -> bool {
-        self.input
-            .peekn::<2>()
-            .map(Self::is_valid_escape)
-            .unwrap_or_default()
+        Self::is_valid_escape(self.input.peekn::<2>())
     }
 
     /// Check if the next thre code points are a valid start of an identifier from the input stream.
     #[inline]
     pub fn has_start_ident(&mut self) -> bool {
-        self.input
-            .peekn::<3>()
-            .map(Self::is_start_ident)
-            .unwrap_or_default()
+        Self::is_start_ident(self.input.peekn::<3>())
     }
 
     /// Check if the next three code points are a valid start of a number from the input stream.
     #[inline]
     pub fn has_start_number(&mut self) -> bool {
-        self.input
-            .peekn::<3>()
-            .map(Self::is_start_number)
-            .unwrap_or_default()
+        Self::is_start_number(self.input.peekn::<3>())
     }
 
     /// If the stream starts with `/*` consume all code points until `*/` is found.
     /// This forms a comment token. Comment tokens are only captured and returned if the `capture_comments`
     /// option is set.
     pub fn consume_comment(&mut self) -> Option<Token> {
-        if let Some(['/', '*']) = self.input.peekn::<2>() {
+        if let [Some('/'), Some('*')] = self.input.peekn::<2>() {
             let _ = unsafe { self.input.nextn_unchecked::<2>() };
             let mut comment = String::new();
             loop {
                 match self.input.peekn::<2>() {
-                    Some(['*', '/']) => {
+                    [Some('*'), Some('/')] => {
                         unsafe { self.input.nextn_unchecked::<2>() };
                         break;
                     }
-                    Some(_) => comment.push(unsafe { self.input.next_unchecked() }),
-                    None => {
+                    [Some(_), _] => comment.push(unsafe { self.input.next_unchecked() }),
+                    _ => {
                         // Consume remaining single code point if it exists
                         self.input.next();
                         self.parse_errors.push("unterminated comment".to_string());
@@ -233,7 +242,6 @@ impl Tokenizer {
                     }
                 }
             }
-            // TODO: Option to capture comments if requested
             if self.options.capture_comments {
                 let comment = self.cache.get_or_insert(Cow::from(comment));
                 return Some(Token::Comment(comment.clone()));
@@ -335,7 +343,11 @@ impl Tokenizer {
         loop {
             match self.input.peek() {
                 Some(c) if c.is_ident() => result.push(unsafe { self.input.next_unchecked() }),
-                Some(_) if self.has_valid_escape() => result.push(self.consume_escape()),
+                Some(_) if self.has_valid_escape() => {
+                    // Pop the `\\` code point
+                    unsafe { self.input.next_unchecked() };
+                    result.push(self.consume_escape())
+                },
                 _ => {
                     let result = self.cache.get_or_insert(Cow::from(result));
                     return result.clone();
@@ -363,7 +375,7 @@ impl Tokenizer {
         }
 
         // Parse decimal
-        if let Some(['.', c]) = self.input.peekn::<2>() {
+        if let [Some('.'), Some(c)] = self.input.peekn::<2>() {
             if c.is_ascii_digit() {
                 repr.extend(unsafe { self.input.nextn_unchecked::<2>() });
                 ntype = NumberType::Number;
@@ -377,7 +389,7 @@ impl Tokenizer {
         }
 
         // Parse exponent
-        if let Some(['E' | 'e', '+' | '-', c]) = self.input.peekn::<3>() {
+        if let [Some('E' | 'e'), Some('+' | '-'), Some(c)] = self.input.peekn::<3>() {
             if c.is_ascii_digit() {
                 repr.extend(unsafe { self.input.nextn_unchecked::<3>() });
                 ntype = NumberType::Number;
@@ -392,7 +404,10 @@ impl Tokenizer {
 
         let value = self.cache.get_or_insert(Cow::from(repr));
         Number {
-            value: NumberValue::from_type(ntype, value.clone()),
+            value: match ntype {
+                NumberType::Integer => NumberValue::Integer(value.parse().unwrap_or(0)),
+                NumberType::Number => NumberValue::Number(value.parse().unwrap_or(0.0)),
+            },
             repr: value.clone(),
         }
     }
@@ -405,6 +420,7 @@ impl Tokenizer {
         if self.has_start_ident() {
             return Token::Dimension { value: number, unit: self.consume_identifier() };
         } else if let Some('%') = self.input.peek() {
+            unsafe { self.input.next_unchecked() };
             return Token::Percentage(number);
         }
         Token::Number(number)
@@ -419,6 +435,8 @@ impl Tokenizer {
             match self.input.peek() {
                 Some(')') | None => return Token::BadUrl,
                 Some(_) if self.has_valid_escape() => {
+                    // Pop the `\\` code point
+                    unsafe { self.input.next_unchecked() };
                     let _ = self.consume_escape();
                 },
                 _ => {}
@@ -434,14 +452,21 @@ impl Tokenizer {
         let _ = self.consume_whitespace();
         loop {
             match self.input.peek() {
-                Some(')') => return Token::Url(self.cache.get_or_insert(Cow::from(value)).clone()),
+                Some(')') => {
+                    unsafe { self.input.next_unchecked() };
+                    return Token::Url(self.cache.get_or_insert(Cow::from(value)).clone())
+                },
                 Some(' ' | '\t' | '\n') => {
                     while let Some(' ' | '\t' | '\n') = self.input.peek() {
                         unsafe { self.input.next_unchecked() };
                     }
 
                     match self.input.peek() {
-                        Some(')') | None => return Token::Url(self.cache.get_or_insert(Cow::from(value)).clone()),
+                        Some(')') => {
+                            unsafe { self.input.next_unchecked() };
+                            return Token::Url(self.cache.get_or_insert(Cow::from(value)).clone())
+                        },
+                        None => return Token::Url(self.cache.get_or_insert(Cow::from(value)).clone()),
                         _ => return self.consume_bad_url(),
                     }
                 }
@@ -454,12 +479,14 @@ impl Tokenizer {
                     return self.consume_bad_url();
                 }
                 Some('\\') => if self.has_valid_escape() {
+                    // Pop the `\\` code point
+                    unsafe { self.input.next_unchecked() };
                     value.push(self.consume_escape());
                 } else {
                     self.parse_errors.push("unterminated url".to_string());
                     return self.consume_bad_url();
                 }
-                Some(c) => value.push(c),
+                Some(_) => value.push(unsafe { self.input.next_unchecked() }),
                 None => {
                     self.parse_errors.push("unterminated url".to_string());
                     return Token::Url(self.cache.get_or_insert(Cow::from(value)).clone());
@@ -478,15 +505,15 @@ impl Tokenizer {
                 unsafe { self.input.next_unchecked() };
             }
 
-            while let Some([' ', ' ']) = self.input.peekn::<2>() {
+            while let [Some(' '|'\t'|'\n'), Some(' '|'\t'|'\n')] = self.input.peekn::<2>() {
                 unsafe { self.input.nextn_unchecked::<2>() };
             }
 
             if let Some('\'' | '"') = self.input.peek() {
                 Token::Function(string.clone())
-            } else if let Some(['"' | '\'', _]) = self.input.peekn::<2>() {
+            } else if let [Some('"' | '\''), Some(_)] = self.input.peekn::<2>() {
                 Token::Function(string.clone())
-            } else if let Some([' ', '"' | '\'']) = self.input.peekn::<2>() {
+            } else if let [Some(' '), Some('"' | '\'')] = self.input.peekn::<2>() {
                 Token::Function(string.clone())
             } else {
                 self.consume_url()
@@ -576,7 +603,7 @@ impl Tokenizer {
             Some('-') => {
                 if self.has_start_number() {
                     return self.consume_numeric();
-                } else if let Some(['-', '-', '>']) = self.input.peekn::<3>() {
+                } else if let [Some('-'), Some('-'), Some('>')] = self.input.peekn::<3>() {
                     unsafe { self.input.nextn_unchecked::<3>() };
                     return Token::CDC;
                 } else if self.has_start_ident() {
@@ -592,7 +619,7 @@ impl Tokenizer {
             }
             Some('<') => {
                 unsafe { self.input.next_unchecked() };
-                if let Some(['!', '-', '-']) = self.input.peekn::<3>() {
+                if let [Some('!'), Some('-'), Some('-')] = self.input.peekn::<3>() {
                     unsafe { self.input.nextn_unchecked::<3>() };
                     return Token::CDO;
                 }
@@ -618,9 +645,26 @@ impl Tokenizer {
                 } else if c.is_ascii_digit() {
                     return self.consume_numeric();
                 }
-                Token::Delim(c)
+                Token::Delim(unsafe { self.input.next_unchecked() })
             }
         }
+    }
+}
+
+impl Iterator for Tokenizer {
+    type Item = Token;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.consume() {
+            Token::EOF => None,
+            other => Some(other)
+        }
+    }
+}
+
+impl FromIterator<Token> for String {
+    fn from_iter<T: IntoIterator<Item = Token>>(iter: T) -> Self {
+        String::from_iter(iter.into_iter().map(|v| v.to_string()))
     }
 }
 
@@ -715,5 +759,159 @@ mod tests {
         assert_eq!(tokenizer.consume(), Token::Hash(Cow::from("A2_B"), HashType::Id));
         let mut tokenizer = Tokenizer::new("#_FB".bytes(), TokenizerOptions::default());
         assert_eq!(tokenizer.consume(), Token::Hash(Cow::from("_FB"), HashType::Id));
+    }
+
+    #[test]
+    fn parse_number() {
+        let mut tokenizer = Tokenizer::new("+".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Delim('+'));
+
+        let mut tokenizer = Tokenizer::new("+1".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Number(Number { repr: Cow::from("+1"), value: NumberValue::Integer(1) }));
+
+        let mut tokenizer = Tokenizer::new("+1%".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Percentage(Number { repr: Cow::from("+1"), value: NumberValue::Integer(1) }));
+
+        let mut tokenizer = Tokenizer::new("+1px".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Dimension { value: Number { repr: Cow::from("+1"), value: NumberValue::Integer(1) }, unit: Cow::from("px") });
+
+        let mut tokenizer = Tokenizer::new("+1em".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Dimension { value: Number { repr: Cow::from("+1"), value: NumberValue::Integer(1) }, unit: Cow::from("em") });
+
+        let mut tokenizer = Tokenizer::new("+1e+10em".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Dimension { value: Number { repr: Cow::from("+1e+10"), value: NumberValue::Number(1e+10) }, unit: Cow::from("em") });
+
+        let mut tokenizer = Tokenizer::new("-".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Delim('-'));
+
+        let mut tokenizer = Tokenizer::new("-1".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Number(Number { repr: Cow::from("-1"), value: NumberValue::Integer(-1) }));
+
+        let mut tokenizer = Tokenizer::new("-1%".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Percentage(Number { repr: Cow::from("-1"), value: NumberValue::Integer(-1) }));
+
+        let mut tokenizer = Tokenizer::new("-1px".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Dimension { value: Number { repr: Cow::from("-1"), value: NumberValue::Integer(-1) }, unit: Cow::from("px") });
+
+        let mut tokenizer = Tokenizer::new("-1em".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Dimension { value: Number { repr: Cow::from("-1"), value: NumberValue::Integer(-1) }, unit: Cow::from("em") });
+
+        let mut tokenizer = Tokenizer::new("-.1e-10em".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Dimension { value: Number { repr: Cow::from("-.1e-10"), value: NumberValue::Number(-0.1e-10) }, unit: Cow::from("em") });
+
+        let mut tokenizer = Tokenizer::new(".".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Delim('.'));
+
+        let mut tokenizer = Tokenizer::new(".1".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Number(Number { repr: Cow::from(".1"), value: NumberValue::Number(0.1) }));
+
+        let mut tokenizer = Tokenizer::new(".1%".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Percentage(Number { repr: Cow::from(".1"), value: NumberValue::Number(0.1) }));
+
+        let mut tokenizer = Tokenizer::new(".1px".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Dimension { value: Number { repr: Cow::from(".1"), value: NumberValue::Number(0.1) }, unit: Cow::from("px") });
+
+        let mut tokenizer = Tokenizer::new(".1em".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Dimension { value: Number { repr: Cow::from(".1"), value: NumberValue::Number(0.1) }, unit: Cow::from("em") });
+
+        let mut tokenizer = Tokenizer::new(".1e+10em".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Dimension { value: Number { repr: Cow::from(".1e+10"), value: NumberValue::Number(0.1e+10) }, unit: Cow::from("em") });
+
+        let mut tokenizer = Tokenizer::new("123".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Number(Number { repr: Cow::from("123"), value: NumberValue::Integer(123) }));
+
+        let mut tokenizer = Tokenizer::new("123%".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Percentage(Number { repr: Cow::from("123"), value: NumberValue::Integer(123) }));
+
+        let mut tokenizer = Tokenizer::new("123px".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Dimension { value: Number { repr: Cow::from("123"), value: NumberValue::Integer(123) }, unit: Cow::from("px") });
+
+        let mut tokenizer = Tokenizer::new("123em".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Dimension { value: Number { repr: Cow::from("123"), value: NumberValue::Integer(123) }, unit: Cow::from("em") });
+
+        let mut tokenizer = Tokenizer::new("123e+10em".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Dimension { value: Number { repr: Cow::from("123e+10"), value: NumberValue::Number(123e+10) }, unit: Cow::from("em") });
+    }
+
+    #[test]
+    fn dash_ident() {
+        let mut tokenizer = Tokenizer::new("-h".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Ident(Cow::from("-h")));
+
+        let mut tokenizer = Tokenizer::new("--".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Ident(Cow::from("--")));
+
+        let mut tokenizer = Tokenizer::new("-\\_".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Ident(Cow::from("-_")));
+    }
+
+    #[test]
+    fn html_comment() {
+        let mut tokenizer = Tokenizer::new("-->".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::CDC);
+
+        let mut tokenizer = Tokenizer::new("<!--".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::CDO);
+
+        let mut tokenizer = Tokenizer::new("<".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Delim('<'));
+    }
+
+    #[test]
+    fn at_keyword() {
+        let mut tokenizer = Tokenizer::new("@".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Delim('@'));
+
+        let mut tokenizer = Tokenizer::new("@import".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::AtKeyword(Cow::from("import")));
+    }
+
+    #[test]
+    fn ident_like() {
+        let mut tokenizer = Tokenizer::new("url(".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Url(Cow::from("")));
+
+        let mut tokenizer = Tokenizer::new("url(https://example.com".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Url(Cow::from("https://example.com")));
+
+        let mut tokenizer = Tokenizer::new("url(https://example.com)".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Url(Cow::from("https://example.com")));
+
+        let mut tokenizer = Tokenizer::new("url(\"https://example.com\")".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Function(Cow::from("url")));
+
+        let mut tokenizer = Tokenizer::new("rgb(128 92 255)".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Function(Cow::from("rgb")));
+
+        let mut tokenizer = Tokenizer::new("hello".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Ident(Cow::from("hello")));
+
+        let mut tokenizer = Tokenizer::new("*".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Delim('*'));
+    }
+
+    #[test]
+    fn escape() {
+        let mut tokenizer = Tokenizer::new("\\unk".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Ident(Cow::from("unk")));
+
+        let mut tokenizer = Tokenizer::new("\\unk(".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Function(Cow::from("unk")));
+
+        let mut tokenizer = Tokenizer::new("\\url(".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::Url(Cow::from("")));
+
+        let mut tokenizer = Tokenizer::new("@import".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.consume(), Token::AtKeyword(Cow::from("import")));
+    }
+
+
+    #[test]
+    fn iterate() {
+        let tokenizer = Tokenizer::new("/* sample */ url(https://example.com)".bytes(), TokenizerOptions::default());
+        assert_eq!(tokenizer.collect::<Vec<Token>>(), vec![
+            Token::Whitespace(" ".to_string()),
+            Token::Url(Cow::from("https://example.com")),
+        ]);
     }
 }
