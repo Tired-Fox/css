@@ -1,0 +1,206 @@
+[
+    {
+        "name": "single backslash parse error",
+        "input": "\\",
+        "output": [{ "token": "delim", "value": "\\" }],
+        "parse_errors": true
+    },
+    {
+        "name": "ident starting with escape",
+        "input": "\\a",
+        "output": [{ "token": "ident", "value": "a" }]
+    },
+    {
+        "name": "all individual character tokens: [](){}:;,",
+        "input": "[](){}:;,",
+        "output": [
+            {"token": "left_brace"},
+            {"token": "right_brace"},
+            {"token": "left_parenthesis"},
+            {"token": "right_parenthesis"},
+            {"token": "left_bracket"},
+            {"token": "right_bracket"},
+            {"token": "colon"},
+            {"token": "semicolon"},
+            {"token": "comma"}
+        ]
+    },
+    {
+        "name": "delims",
+        "parse_errors": true,
+        "input": "-+#*@$<.\\",
+        "output": [
+            {"token": "delim", "value": "-" },
+            {"token": "delim", "value": "+" },
+            {"token": "delim", "value": "#" },
+            {"token": "delim", "value": "*" },
+            {"token": "delim", "value": "@" },
+            {"token": "delim", "value": "$" },
+            {"token": "delim", "value": "<" },
+            {"token": "delim", "value": "." },
+            {"token": "delim", "value": "\\" }
+        ]
+    },
+    {
+        "name": "whitespace",
+        "input": " \f\r\n\n\r ",
+        "output": [{"token": "whitespace", "value": " \n\n\n\n " }]
+    },
+    {
+        "name": "comment",
+        "capture_comments": true,
+        "input": "/* some comment text * / */",
+        "output": [{ "token": "comment", "value": " some comment text * / " }]
+    },
+    {
+        "name": "string",
+        "input": "\"first string\"'second string'",
+        "output": [{"token": "string", "value": "first string"}, {"token": "string", "value": "second string"}]
+    },
+    {
+        "name": "string with escapes",
+        "input": "\"first string\\\n\\\"\"'second string\\''",
+        "output": [{"token": "string", "value": "first string\n\""}, {"token": "string", "value": "second string'"}]
+    },
+    {
+        "name": "string not closed EOF",
+        "parse_errors": true,
+        "input": "'not closed",
+        "output": [{"token": "string", "value": "not closed"}]
+    },
+    {
+        "name": "string not closed newline",
+        "parse_errors": true,
+        "input": "'not closed\n",
+        "output": [{"token": "bad_string"}, {"token": "whitespace", "value": "\n"}]
+    },
+    {
+        "name": "ident-like identifier",
+        "input": "\\abc",
+        "output": [{"token": "ident", "value": "abc"}]
+    },
+    {
+        "name": "ident-like identifier - dashes",
+        "input": "-a --hello",
+        "output": [
+            {"token": "ident", "value": "-a"},
+            {"token": "whitespace", "value": " "},
+            {"token": "ident", "value": "--hello"}
+        ]
+    },
+    {
+        "name": "ident-like function",
+        "input": "\\abc(",
+        "output": [{"token": "function", "value": "abc"}]
+    },
+    {
+        "name": "ident-like url function",
+        "input": "url(''",
+        "output": [{"token": "function", "value": "url"}, {"token": "string", "value": ""}]
+    },
+    {
+        "name": "ident-like url",
+        "input": "url(https://example.com)",
+        "output": [{"token": "url", "value": "https://example.com"}]
+    },
+    {
+        "name": "ident-like url - unterminated parse error",
+        "parse_errors": true,
+        "input": "url(https://example.com",
+        "output": [{"token": "url", "value": "https://example.com"}]
+    },
+    {
+        "name": "hash non ID",
+        "input": "#12a",
+        "output": [{"token": "hash", "value": { "value": "12a", "variant": "unrestricted"}}]
+    },
+    {
+        "name": "hash ID",
+        "input": "#a12",
+        "output": [{"token": "hash", "value": { "value": "a12", "variant": "id"}}]
+    },
+    {
+        "name": "number - integer",
+        "input": "12 +12 -12",
+        "output": [
+            {"token": "number", "value": { "type": "integer", "repr": "12", "value": 12}},
+            {"token": "whitespace", "value": " "},
+            {"token": "number", "value": { "type": "integer", "repr": "+12", "value": 12}},
+            {"token": "whitespace", "value": " "},
+            {"token": "number", "value": { "type": "integer", "repr": "-12", "value": -12}}
+        ]
+    },
+    {
+        "name": "number - float",
+        "input": "12.1 +12.1 -12.1 .12",
+        "output": [
+            {"token": "number", "value": { "type": "number", "repr": "12.1", "value": 12.1}},
+            {"token": "whitespace", "value": " "},
+            {"token": "number", "value": { "type": "number", "repr": "+12.1", "value": 12.1}},
+            {"token": "whitespace", "value": " "},
+            {"token": "number", "value": { "type": "number", "repr": "-12.1", "value": -12.1}},
+            {"token": "whitespace", "value": " "},
+            {"token": "number", "value": { "type": "number", "repr": ".12", "value": 0.12}}
+        ]
+    },
+    {
+        "name": "number - exponent",
+        "input": "12e-2 +12e+2 -12e-2",
+        "output": [
+            {"token": "number", "value": { "type": "number", "repr": "12e-2", "value": 0.12}},
+            {"token": "whitespace", "value": " "},
+            {"token": "number", "value": { "type": "number", "repr": "+12e+2", "value": 1200.0}},
+            {"token": "whitespace", "value": " "},
+            {"token": "number", "value": { "type": "number", "repr": "-12e-2", "value": -0.12}}
+        ]
+    },
+    {
+        "name": "number - float & exponent",
+        "input": "12.1e-2 +12.1e+2 -12.1e-2 .12e+2",
+        "output": [
+            {"token": "number", "value": { "type": "number", "repr": "12.1e-2", "value": 0.121}},
+            {"token": "whitespace", "value": " "},
+            {"token": "number", "value": { "type": "number", "repr": "+12.1e+2", "value": 1210.0}},
+            {"token": "whitespace", "value": " "},
+            {"token": "number", "value": { "type": "number", "repr": "-12.1e-2", "value": -0.121}},
+            {"token": "whitespace", "value": " "},
+            {"token": "number", "value": { "type": "number", "repr": ".12e+2", "value": 12.0}}
+        ]
+    },
+    {
+        "name": "cdo & cdc",
+        "input": "<!--'Some valid tokens'-->",
+        "output": [
+            {"token": "cdo"},
+            {"token": "string", "value": "Some valid tokens"},
+            {"token": "cdc"}
+        ]
+    },
+    {
+        "name": "real input",
+        "input": "/* example input */\r\np > a ~ div {\r\n  color: #e3e;\r\n}\r\n",
+        "output": [
+            {"token": "whitespace", "value": "\n"},
+            {"token": "ident", "value": "p"},
+            {"token": "whitespace", "value": " "},
+            {"token": "delim", "value": ">"},
+            {"token": "whitespace", "value": " "},
+            {"token": "ident", "value": "a"},
+            {"token": "whitespace", "value": " "},
+            {"token": "delim", "value": "~"},
+            {"token": "whitespace", "value": " "},
+            {"token": "ident", "value": "div"},
+            {"token": "whitespace", "value": " "},
+            {"token": "left_bracket"},
+            {"token": "whitespace", "value": "\n  "},
+            {"token": "ident", "value": "color"},
+            {"token": "colon"},
+            {"token": "whitespace", "value": " "},
+            {"token": "hash", "value": { "value": "e3e", "variant": "id"}},
+            {"token": "semicolon"},
+            {"token": "whitespace", "value": "\n"},
+            {"token": "right_bracket"},
+            {"token": "whitespace", "value": "\n"}
+        ]
+    }
+]
