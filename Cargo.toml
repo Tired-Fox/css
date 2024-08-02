@@ -6,16 +6,13 @@ edition = "2021"
 [[bin]]
 name = "test"
 path = "src/bin/test.rs"
-required-features = [ "serde", "async", "test" ]
+required-features = [ "serde" ]
 
 [features]
-async = ["dep:futures-util"]
 serde = ["dep:serde", "dep:serde_json"]
-test = ["dep:smol"]
 
 [dependencies]
 encoding_rs = "0.8.34"
-futures-util = { version = "0.3.30", optional = true }
 hashbrown = { version = "0.14.5", features = ["rayon"] }
 strum = { version = "0.26.3", features = ["strum_macros"] }
 strum_macros = "0.26.4"
@@ -23,6 +20,3 @@ strum_macros = "0.26.4"
 # Optional Dependencies
 serde = { version = "1.0.204", optional = true, features = ["derive"] }
 serde_json = { version = "1.0.121", optional = true }
-
-# Test Dependencies
-smol = { version = "2.0.0", optional = true }

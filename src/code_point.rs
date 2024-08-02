@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, fmt::Debug};
 use encoding_rs::{CoderResult, Decoder, Encoder, Encoding, UTF_8};
 
 pub const REPLACEMENT_CHARACTER: char = char::REPLACEMENT_CHARACTER;
@@ -15,6 +15,14 @@ pub struct CodePointStream<'stream>
 
     buffer: VecDeque<char>,
     stream: Option<Box<dyn Iterator<Item = u8> + 'stream>>
+}
+
+impl<'stream> Debug for CodePointStream<'stream> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodePointStream")
+            .field("buffer", &self.buffer)
+            .finish()
+    }
 }
 
 impl<'stream> CodePointStream<'stream> {

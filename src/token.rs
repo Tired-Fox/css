@@ -173,6 +173,7 @@ impl TokenizerOptions {
 ///
 /// This tokenizer is a stateful stream of tokens. The common text tokens such as strings, urls,
 /// identifiers, etc. are cached and reused if it occurs more than once.
+#[derive(Debug)]
 pub struct Tokenizer<'stream> {
     options: TokenizerOptions,
 
