@@ -6,22 +6,22 @@ pub const FORM_FEED: char = 0x000C as char;
 pub const NULL: char = 0x0000 as char;
 
 /// Takes a stream of utf-8 bytes and converts them to tokens
-pub struct CodePointStream
+pub struct CodePointStream<'stream>
 {
     decoder: Decoder,
     #[allow(dead_code)]
     encoder: Encoder,
 
     buffer: VecDeque<char>,
-    stream: Option<Box<dyn Iterator<Item = u8>>>
+    stream: Option<Box<dyn Iterator<Item = u8> + 'stream>>
 }
 
-impl CodePointStream {
+impl<'stream> CodePointStream<'stream> {
     pub const REPLACEMENT_CHARACTER: char = char::REPLACEMENT_CHARACTER;
     pub const FORM_FEED: char = 0x000C as char;
     pub const NULL: char = 0x0000 as char;
 
-    pub fn new<I: IntoIterator<Item = u8> + 'static>(stream: I, encoding: Option<&'static Encoding>) -> Self
+    pub fn new<I: IntoIterator<Item = u8> + 'stream>(stream: I, encoding: Option<&'static Encoding>) -> Self
     {
         let encoding = encoding.unwrap_or(UTF_8);
         Self {
@@ -244,7 +244,7 @@ impl CodePointStream {
     }
 }
 
-impl Iterator for CodePointStream {
+impl<'stream> Iterator for CodePointStream<'stream> {
     type Item = char;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -262,19 +262,19 @@ mod async_code_point {
     use super::{NULL, FORM_FEED, REPLACEMENT_CHARACTER};
 
     /// Takes a stream of utf-8 bytes and converts them to tokens
-    pub struct AsyncCodePointStream
+    pub struct AsyncCodePointStream<'stream>
     {
         decoder: Decoder,
         #[allow(dead_code)]
         encoder: Encoder,
 
         buffer: VecDeque<char>,
-        stream: Pin<Box<dyn Stream<Item = u8>>>,
+        stream: Pin<Box<dyn Stream<Item = u8> + 'stream>>,
     }
 
-    impl AsyncCodePointStream {
+    impl<'stream> AsyncCodePointStream<'stream> {
 
-        pub fn new<I: Stream<Item = u8> + Unpin + 'static>(stream: I, encoding: Option<&'static Encoding>) -> Self {
+        pub fn new<I: Stream<Item = u8> + Unpin + 'stream>(stream: I, encoding: Option<&'static Encoding>) -> Self {
             let encoding = encoding.unwrap_or(UTF_8);
             Self {
                 decoder: encoding.new_decoder(),

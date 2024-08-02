@@ -43,18 +43,22 @@ enum NumberType {
     Number,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(tag = "type", content = "value", rename_all = "snake_case"))]
 #[derive(Debug, Clone, Copy, PartialEq, strum_macros::EnumIs)]
 pub enum NumberValue {
     Integer(i32),
     Number(f32),
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Number {
     repr: Cow<'static, str>,
+    #[cfg_attr(feature = "serde", serde(flatten))]
     value: NumberValue,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(rename_all = "snake_case"))]
 #[derive(Default, Debug, Clone, PartialEq, strum_macros::EnumIs)]
 pub enum HashType {
     Id,
@@ -63,20 +67,21 @@ pub enum HashType {
 }
 
 #[allow(dead_code)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(tag = "type", content = "value", rename_all = "snake_case"))]
 #[derive(Debug, Clone, PartialEq, strum_macros::EnumIs)]
 pub enum Token {
     Ident(Cow<'static, str>),
     Function(Cow<'static, str>),
     AtKeyword(Cow<'static, str>),
 
-    Hash(Cow<'static, str>, HashType),
+    Hash { value: Cow<'static, str>, variant: HashType },
     String(Cow<'static, str>),
     Url(Cow<'static, str>),
     BadString,
     BadUrl,
 
     Comment(Cow<'static, str>),
-    Whitespace(String),
+    Whitespace(Cow<'static, str>),
 
     Number(Number),
     Percentage(Number),
@@ -109,13 +114,13 @@ impl Display for Token {
             Self::Ident(value) => value.to_string(),
             Self::Function(name) => format!("{name}("),
             Self::AtKeyword(keyword) => format!("@{keyword}"),
-            Self::Hash(hash, _) => hash.to_string(),
+            Self::Hash { value: hash, .. } => hash.to_string(),
             Self::String(value) => value.to_string(),
             Self::Url(url) => format!("url({url})"),
             Self::BadString => "/* Bad String */".to_string(),
             Self::BadUrl => "/* Bad Url */".to_string(),
             Self::Comment(comment) => format!("/*{comment}*/"),
-            Self::Whitespace(whitespace) => whitespace.clone(),
+            Self::Whitespace(whitespace) => whitespace.to_string(),
             Self::Number(Number { repr, .. }) => repr.to_string(),
             Self::Percentage(Number { repr, .. }) => format!("{repr}%"),
             Self::Dimension {
@@ -151,23 +156,28 @@ pub struct TokenizerOptions {
 ///
 /// This tokenizer is a stateful stream of tokens. The common text tokens such as strings, urls,
 /// identifiers, etc. are cached and reused if it occurs more than once.
-pub struct Tokenizer {
+pub struct Tokenizer<'stream> {
     options: TokenizerOptions,
 
     cache: HashSet<Cow<'static, str>>,
     parse_errors: Vec<String>,
-    input: CodePointStream,
+    input: CodePointStream<'stream>,
 }
 
-impl Tokenizer {
+impl<'stream> Tokenizer<'stream> {
     /// Create a new tokenizer from a byte iterator and options.
-    pub fn new<I: IntoIterator<Item = u8> + 'static>(input: I, options: TokenizerOptions) -> Self {
+    pub fn new<I: IntoIterator<Item = u8> + 'stream>(input: I, options: TokenizerOptions) -> Self {
         Self {
             input: CodePointStream::new(input, options.encoding),
             cache: HashSet::new(),
             parse_errors: Vec::new(),
             options,
         }
+    }
+
+    /// Check if the tokenizer has any parse errors.
+    pub fn has_errors(&self) -> bool {
+        !self.parse_errors.is_empty()
     }
 
     /// Check if the provided two code points are a valid escape sequence.
@@ -270,7 +280,7 @@ impl Tokenizer {
                 _ => break,
             }
         }
-        Token::Whitespace(whitespace)
+        Token::Whitespace(Cow::from(whitespace))
     }
 
     /// Assume that the `\` character has been consumed and that the next code point is the start
@@ -605,7 +615,7 @@ impl Tokenizer {
                             hash_type = HashType::Id;
                         }
 
-                        Token::Hash(self.consume_identifier(), hash_type)
+                        Token::Hash{ value: self.consume_identifier(), variant: hash_type }
                     }
                     _ => Token::Delim('#'),
                 }
@@ -651,6 +661,7 @@ impl Tokenizer {
                 Token::Delim('@')
             }
             Some('\\') => {
+                unsafe { self.input.next_unchecked() };
                 if self.has_valid_escape() {
                     return self.consume_ident_like();
                 }
@@ -670,7 +681,7 @@ impl Tokenizer {
     }
 }
 
-impl Iterator for Tokenizer {
+impl<'stream> Iterator for Tokenizer<'stream> {
     type Item = Token;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -685,474 +696,6 @@ impl FromIterator<Token> for String {
     fn from_iter<T: IntoIterator<Item = Token>>(iter: T) -> Self {
         String::from_iter(iter.into_iter().map(|v| v.to_string()))
     }
-}
-
-#[cfg(test)]
-mod testing {
-    use std::path::PathBuf;
-
-    pub fn get_tests(root: &'static str) -> Vec<PathBuf> {
-        std::fs::read_dir(format!("tests/{root}"))
-            .unwrap()
-            .filter_map(|v| v.ok())
-            .filter(|v| v.path().is_file() && v.path().extension().map(|v| v == "json").unwrap_or_default())
-            .map(|v| v.path())
-            .collect::<Vec<_>>()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use serde::Deserialize;
-    use super::*;
-
-    #[derive(Debug, Deserialize)]
-    struct Test {
-        name: String,
-        input: String,
-        output: serde_json::Value,
-        parse_errors: bool
-    }
-
-    #[test]
-    fn run_tokenization_tests() {
-        for test in testing::get_tests("tokenize") {
-            println!("\x1b[1;33m{}\x1b[0m", match test.file_stem() {
-                Some(stem) => stem.to_str().unwrap().to_ascii_uppercase(),
-                None => String::new()
-            });
-            let data = std::fs::read_to_string(&test).unwrap();
-            let tests = serde_json::from_str::<Vec<Test>>(data.as_str()).unwrap();
-            for test in tests {
-                println!("  \x1b[2m{}\x1b[0m", test.name);
-            }
-        }
-    }
-
-    //#[test]
-    //fn parse_eof() {
-    //    let mut tokenizer = Tokenizer::new("".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::EOF);
-    //}
-    //
-    //#[test]
-    //fn parse_comment() {
-    //    let mut tokenizer = Tokenizer::new("/* hello */".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::EOF);
-    //
-    //    let mut tokenizer = Tokenizer::new("/* hello ".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::EOF);
-    //    assert!(!tokenizer.parse_errors.is_empty());
-    //
-    //    let mut tokenizer = Tokenizer::new(
-    //        "/* hello */".bytes(),
-    //        TokenizerOptions {
-    //            capture_comments: true,
-    //            ..Default::default()
-    //        },
-    //    );
-    //    assert_eq!(tokenizer.consume(), Token::Comment(Cow::from(" hello ")));
-    //}
-    //
-    //#[test]
-    //fn parse_whitespace() {
-    //    let mut tokenizer = Tokenizer::new(" \t\n".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Whitespace(" \t\n".to_string()));
-    //    assert_eq!(tokenizer.consume(), Token::EOF);
-    //}
-    //
-    //#[test]
-    //fn parse_string() {
-    //    let mut tokenizer =
-    //        Tokenizer::new(r#""some string\"""#.bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::String(Cow::from(r#"some string""#))
-    //    );
-    //    assert_eq!(tokenizer.consume(), Token::EOF);
-    //
-    //    let mut tokenizer =
-    //        Tokenizer::new(r#"'some string\''"#.bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::String(Cow::from(r#"some string'"#))
-    //    );
-    //    assert_eq!(tokenizer.consume(), Token::EOF);
-    //}
-    //
-    //#[test]
-    //fn parse_char_tokens() {
-    //    let mut tokenizer = Tokenizer::new("()[]{}:;,".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::LeftParenthesis);
-    //    assert_eq!(tokenizer.consume(), Token::RightParenthesis);
-    //    assert_eq!(tokenizer.consume(), Token::LeftBrace);
-    //    assert_eq!(tokenizer.consume(), Token::RightBrace);
-    //    assert_eq!(tokenizer.consume(), Token::LeftBracket);
-    //    assert_eq!(tokenizer.consume(), Token::RightBracket);
-    //    assert_eq!(tokenizer.consume(), Token::Colon);
-    //    assert_eq!(tokenizer.consume(), Token::Semicolon);
-    //    assert_eq!(tokenizer.consume(), Token::Comma);
-    //    assert_eq!(tokenizer.consume(), Token::EOF);
-    //}
-    //
-    //#[test]
-    //fn parse_hash() {
-    //    let mut tokenizer = Tokenizer::new("#".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Delim('#'));
-    //
-    //    let mut tokenizer = Tokenizer::new("#1".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Hash(Cow::from("1"), HashType::Unrestricted)
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("#1FB".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Hash(Cow::from("1FB"), HashType::Unrestricted)
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("#A2_B".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Hash(Cow::from("A2_B"), HashType::Id)
-    //    );
-    //    let mut tokenizer = Tokenizer::new("#_FB".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Hash(Cow::from("_FB"), HashType::Id)
-    //    );
-    //}
-    //
-    //#[test]
-    //fn parse_number() {
-    //    let mut tokenizer = Tokenizer::new("+".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Delim('+'));
-    //
-    //    let mut tokenizer = Tokenizer::new("+1".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Number(Number {
-    //            repr: Cow::from("+1"),
-    //            value: NumberValue::Integer(1)
-    //        })
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("+1%".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Percentage(Number {
-    //            repr: Cow::from("+1"),
-    //            value: NumberValue::Integer(1)
-    //        })
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("+1px".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Dimension {
-    //            value: Number {
-    //                repr: Cow::from("+1"),
-    //                value: NumberValue::Integer(1)
-    //            },
-    //            unit: Cow::from("px")
-    //        }
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("+1em".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Dimension {
-    //            value: Number {
-    //                repr: Cow::from("+1"),
-    //                value: NumberValue::Integer(1)
-    //            },
-    //            unit: Cow::from("em")
-    //        }
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("+1e+10em".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Dimension {
-    //            value: Number {
-    //                repr: Cow::from("+1e+10"),
-    //                value: NumberValue::Number(1e+10)
-    //            },
-    //            unit: Cow::from("em")
-    //        }
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("-".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Delim('-'));
-    //
-    //    let mut tokenizer = Tokenizer::new("-1".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Number(Number {
-    //            repr: Cow::from("-1"),
-    //            value: NumberValue::Integer(-1)
-    //        })
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("-1%".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Percentage(Number {
-    //            repr: Cow::from("-1"),
-    //            value: NumberValue::Integer(-1)
-    //        })
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("-1px".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Dimension {
-    //            value: Number {
-    //                repr: Cow::from("-1"),
-    //                value: NumberValue::Integer(-1)
-    //            },
-    //            unit: Cow::from("px")
-    //        }
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("-1em".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Dimension {
-    //            value: Number {
-    //                repr: Cow::from("-1"),
-    //                value: NumberValue::Integer(-1)
-    //            },
-    //            unit: Cow::from("em")
-    //        }
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("-.1e-10em".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Dimension {
-    //            value: Number {
-    //                repr: Cow::from("-.1e-10"),
-    //                value: NumberValue::Number(-0.1e-10)
-    //            },
-    //            unit: Cow::from("em")
-    //        }
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new(".".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Delim('.'));
-    //
-    //    let mut tokenizer = Tokenizer::new(".1".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Number(Number {
-    //            repr: Cow::from(".1"),
-    //            value: NumberValue::Number(0.1)
-    //        })
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new(".1%".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Percentage(Number {
-    //            repr: Cow::from(".1"),
-    //            value: NumberValue::Number(0.1)
-    //        })
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new(".1px".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Dimension {
-    //            value: Number {
-    //                repr: Cow::from(".1"),
-    //                value: NumberValue::Number(0.1)
-    //            },
-    //            unit: Cow::from("px")
-    //        }
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new(".1em".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Dimension {
-    //            value: Number {
-    //                repr: Cow::from(".1"),
-    //                value: NumberValue::Number(0.1)
-    //            },
-    //            unit: Cow::from("em")
-    //        }
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new(".1e+10em".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Dimension {
-    //            value: Number {
-    //                repr: Cow::from(".1e+10"),
-    //                value: NumberValue::Number(0.1e+10)
-    //            },
-    //            unit: Cow::from("em")
-    //        }
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("123".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Number(Number {
-    //            repr: Cow::from("123"),
-    //            value: NumberValue::Integer(123)
-    //        })
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("123%".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Percentage(Number {
-    //            repr: Cow::from("123"),
-    //            value: NumberValue::Integer(123)
-    //        })
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("123px".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Dimension {
-    //            value: Number {
-    //                repr: Cow::from("123"),
-    //                value: NumberValue::Integer(123)
-    //            },
-    //            unit: Cow::from("px")
-    //        }
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("123em".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Dimension {
-    //            value: Number {
-    //                repr: Cow::from("123"),
-    //                value: NumberValue::Integer(123)
-    //            },
-    //            unit: Cow::from("em")
-    //        }
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new("123e+10em".bytes(), TokenizerOptions::default());
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Dimension {
-    //            value: Number {
-    //                repr: Cow::from("123e+10"),
-    //                value: NumberValue::Number(123e+10)
-    //            },
-    //            unit: Cow::from("em")
-    //        }
-    //    );
-    //}
-    //
-    //#[test]
-    //fn dash_ident() {
-    //    let mut tokenizer = Tokenizer::new("-h".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Ident(Cow::from("-h")));
-    //
-    //    let mut tokenizer = Tokenizer::new("--".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Ident(Cow::from("--")));
-    //
-    //    let mut tokenizer = Tokenizer::new("-\\_".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Ident(Cow::from("-_")));
-    //}
-    //
-    //#[test]
-    //fn html_comment() {
-    //    let mut tokenizer = Tokenizer::new("-->".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::CDC);
-    //
-    //    let mut tokenizer = Tokenizer::new("<!--".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::CDO);
-    //
-    //    let mut tokenizer = Tokenizer::new("<".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Delim('<'));
-    //}
-    //
-    //#[test]
-    //fn at_keyword() {
-    //    let mut tokenizer = Tokenizer::new("@".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Delim('@'));
-    //
-    //    let mut tokenizer = Tokenizer::new("@import".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::AtKeyword(Cow::from("import")));
-    //}
-    //
-    //#[test]
-    //fn ident_like() {
-    //    let mut tokenizer = Tokenizer::new("url(".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Url(Cow::from("")));
-    //
-    //    let mut tokenizer = Tokenizer::new(
-    //        "url(https://example.com".bytes(),
-    //        TokenizerOptions::default(),
-    //    );
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Url(Cow::from("https://example.com"))
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new(
-    //        "url(https://example.com)".bytes(),
-    //        TokenizerOptions::default(),
-    //    );
-    //    assert_eq!(
-    //        tokenizer.consume(),
-    //        Token::Url(Cow::from("https://example.com"))
-    //    );
-    //
-    //    let mut tokenizer = Tokenizer::new(
-    //        "url(\"https://example.com\")".bytes(),
-    //        TokenizerOptions::default(),
-    //    );
-    //    assert_eq!(tokenizer.consume(), Token::Function(Cow::from("url")));
-    //
-    //    let mut tokenizer = Tokenizer::new("rgb(128 92 255)".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Function(Cow::from("rgb")));
-    //
-    //    let mut tokenizer = Tokenizer::new("hello".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Ident(Cow::from("hello")));
-    //
-    //    let mut tokenizer = Tokenizer::new("*".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Delim('*'));
-    //}
-    //
-    //#[test]
-    //fn escape() {
-    //    let mut tokenizer = Tokenizer::new("\\unk".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Ident(Cow::from("unk")));
-    //
-    //    let mut tokenizer = Tokenizer::new("\\unk(".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Function(Cow::from("unk")));
-    //
-    //    let mut tokenizer = Tokenizer::new("\\url(".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::Url(Cow::from("")));
-    //
-    //    let mut tokenizer = Tokenizer::new("@import".bytes(), TokenizerOptions::default());
-    //    assert_eq!(tokenizer.consume(), Token::AtKeyword(Cow::from("import")));
-    //}
-    //
-    //#[test]
-    //fn iterate() {
-    //    let tokenizer = Tokenizer::new(
-    //        "/* sample */ url(https://example.com)".bytes(),
-    //        TokenizerOptions::default(),
-    //    );
-    //    assert_eq!(
-    //        tokenizer.collect::<Vec<Token>>(),
-    //        vec![
-    //            Token::Whitespace(" ".to_string()),
-    //            Token::Url(Cow::from("https://example.com")),
-    //        ]
-    //    );
-    //}
 }
 
 #[cfg(feature = "async")]
@@ -1171,17 +714,17 @@ mod async_tokenizer {
     ///
     /// This tokenizer is a stateful stream of tokens. The common text tokens such as strings, urls,
     /// identifiers, etc. are cached and reused if it occurs more than once.
-    pub struct AsyncTokenizer {
+    pub struct AsyncTokenizer<'stream> {
         options: TokenizerOptions,
 
         cache: HashSet<Cow<'static, str>>,
         parse_errors: Vec<String>,
-        input: AsyncCodePointStream,
+        input: AsyncCodePointStream<'stream>,
     }
 
-    impl AsyncTokenizer {
+    impl<'stream> AsyncTokenizer<'stream> {
         /// Create a new tokenizer from a byte iterator and options.
-        pub fn new<I: Stream<Item = u8> + Unpin + 'static>(
+        pub fn new<I: Stream<Item = u8> + Unpin + 'stream>(
             input: I,
             options: TokenizerOptions,
         ) -> Self {
@@ -1191,6 +734,11 @@ mod async_tokenizer {
                 parse_errors: Vec::new(),
                 options,
             }
+        }
+
+        /// Check if the tokenizer has any parse errors.
+        pub fn has_errors(&self) -> bool {
+            !self.parse_errors.is_empty()
         }
 
         /// Check if the provided two code points are a valid escape sequence.
@@ -1293,7 +841,7 @@ mod async_tokenizer {
                     _ => break,
                 }
             }
-            Token::Whitespace(whitespace)
+            Token::Whitespace(Cow::from(whitespace))
         }
 
         /// Assume that the `\` character has been consumed and that the next code point is the start
@@ -1633,7 +1181,7 @@ mod async_tokenizer {
                                 hash_type = HashType::Id;
                             }
 
-                            Token::Hash(self.consume_identifier().await, hash_type)
+                            Token::Hash { value: self.consume_identifier().await, variant: hash_type }
                         }
                         _ => Token::Delim('#'),
                     }
@@ -1680,6 +1228,7 @@ mod async_tokenizer {
                     Token::Delim('@')
                 }
                 Some('\\') => {
+                    unsafe { self.input.next_unchecked() };
                     if self.has_valid_escape().await {
                         return self.consume_ident_like().await;
                     }
@@ -1699,7 +1248,7 @@ mod async_tokenizer {
         }
     }
 
-    impl Stream for AsyncTokenizer {
+    impl<'stream> Stream for AsyncTokenizer<'stream> {
         type Item = Token;
 
         fn poll_next(
@@ -1711,498 +1260,6 @@ mod async_tokenizer {
                 Poll::Ready(other) => Poll::Ready(Some(other)),
                 Poll::Pending => Poll::Pending,
             }
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        macro_rules! stream {
-            ($($token: tt)*) => {
-                futures_util::stream::iter($($token)*.bytes())
-            };
-        }
-
-        #[test]
-        fn parse_eof() {
-            smol::block_on(async move {
-                let mut tokenizer = AsyncTokenizer::new(stream!(""), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::EOF);
-            })
-        }
-
-        #[test]
-        fn parse_comment() {
-            smol::block_on(async move {
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("/* hello */"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::EOF);
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("/* hello "), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::EOF);
-                assert!(!tokenizer.parse_errors.is_empty());
-
-                let mut tokenizer = AsyncTokenizer::new(
-                    stream!("/* hello */"),
-                    TokenizerOptions {
-                        capture_comments: true,
-                        ..Default::default()
-                    },
-                );
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Comment(Cow::from(" hello "))
-                );
-            });
-        }
-
-        #[test]
-        fn parse_whitespace() {
-            smol::block_on(async move {
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!(" \t\n"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Whitespace(" \t\n".to_string())
-                );
-                assert_eq!(tokenizer.consume().await, Token::EOF);
-            });
-        }
-
-        #[test]
-        fn parse_string() {
-            smol::block_on(async move {
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!(r#""some string\"""#), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::String(Cow::from(r#"some string""#))
-                );
-                assert_eq!(tokenizer.consume().await, Token::EOF);
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!(r#"'some string\''"#), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::String(Cow::from(r#"some string'"#))
-                );
-                assert_eq!(tokenizer.consume().await, Token::EOF);
-            });
-        }
-
-        #[test]
-        fn parse_char_tokens() {
-            smol::block_on(async move {
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("()[]{}:;,"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::LeftParenthesis);
-                assert_eq!(tokenizer.consume().await, Token::RightParenthesis);
-                assert_eq!(tokenizer.consume().await, Token::LeftBrace);
-                assert_eq!(tokenizer.consume().await, Token::RightBrace);
-                assert_eq!(tokenizer.consume().await, Token::LeftBracket);
-                assert_eq!(tokenizer.consume().await, Token::RightBracket);
-                assert_eq!(tokenizer.consume().await, Token::Colon);
-                assert_eq!(tokenizer.consume().await, Token::Semicolon);
-                assert_eq!(tokenizer.consume().await, Token::Comma);
-                assert_eq!(tokenizer.consume().await, Token::EOF);
-            });
-        }
-
-        #[test]
-        fn parse_hash() {
-            smol::block_on(async move {
-                let mut tokenizer = AsyncTokenizer::new(stream!("#"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Delim('#'));
-
-                let mut tokenizer = AsyncTokenizer::new(stream!("#1"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Hash(Cow::from("1"), HashType::Unrestricted)
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("#1FB"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Hash(Cow::from("1FB"), HashType::Unrestricted)
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("#A2_B"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Hash(Cow::from("A2_B"), HashType::Id)
-                );
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("#_FB"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Hash(Cow::from("_FB"), HashType::Id)
-                );
-            });
-        }
-
-        #[test]
-        fn parse_number() {
-            smol::block_on(async move {
-                let mut tokenizer = AsyncTokenizer::new(stream!("+"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Delim('+'));
-
-                let mut tokenizer = AsyncTokenizer::new(stream!("+1"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Number(Number {
-                        repr: Cow::from("+1"),
-                        value: NumberValue::Integer(1)
-                    })
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("+1%"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Percentage(Number {
-                        repr: Cow::from("+1"),
-                        value: NumberValue::Integer(1)
-                    })
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("+1px"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Dimension {
-                        value: Number {
-                            repr: Cow::from("+1"),
-                            value: NumberValue::Integer(1)
-                        },
-                        unit: Cow::from("px")
-                    }
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("+1em"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Dimension {
-                        value: Number {
-                            repr: Cow::from("+1"),
-                            value: NumberValue::Integer(1)
-                        },
-                        unit: Cow::from("em")
-                    }
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("+1e+10em"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Dimension {
-                        value: Number {
-                            repr: Cow::from("+1e+10"),
-                            value: NumberValue::Number(1e+10)
-                        },
-                        unit: Cow::from("em")
-                    }
-                );
-
-                let mut tokenizer = AsyncTokenizer::new(stream!("-"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Delim('-'));
-
-                let mut tokenizer = AsyncTokenizer::new(stream!("-1"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Number(Number {
-                        repr: Cow::from("-1"),
-                        value: NumberValue::Integer(-1)
-                    })
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("-1%"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Percentage(Number {
-                        repr: Cow::from("-1"),
-                        value: NumberValue::Integer(-1)
-                    })
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("-1px"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Dimension {
-                        value: Number {
-                            repr: Cow::from("-1"),
-                            value: NumberValue::Integer(-1)
-                        },
-                        unit: Cow::from("px")
-                    }
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("-1em"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Dimension {
-                        value: Number {
-                            repr: Cow::from("-1"),
-                            value: NumberValue::Integer(-1)
-                        },
-                        unit: Cow::from("em")
-                    }
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("-.1e-10em"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Dimension {
-                        value: Number {
-                            repr: Cow::from("-.1e-10"),
-                            value: NumberValue::Number(-0.1e-10)
-                        },
-                        unit: Cow::from("em")
-                    }
-                );
-
-                let mut tokenizer = AsyncTokenizer::new(stream!("."), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Delim('.'));
-
-                let mut tokenizer = AsyncTokenizer::new(stream!(".1"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Number(Number {
-                        repr: Cow::from(".1"),
-                        value: NumberValue::Number(0.1)
-                    })
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!(".1%"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Percentage(Number {
-                        repr: Cow::from(".1"),
-                        value: NumberValue::Number(0.1)
-                    })
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!(".1px"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Dimension {
-                        value: Number {
-                            repr: Cow::from(".1"),
-                            value: NumberValue::Number(0.1)
-                        },
-                        unit: Cow::from("px")
-                    }
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!(".1em"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Dimension {
-                        value: Number {
-                            repr: Cow::from(".1"),
-                            value: NumberValue::Number(0.1)
-                        },
-                        unit: Cow::from("em")
-                    }
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!(".1e+10em"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Dimension {
-                        value: Number {
-                            repr: Cow::from(".1e+10"),
-                            value: NumberValue::Number(0.1e+10)
-                        },
-                        unit: Cow::from("em")
-                    }
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("123"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Number(Number {
-                        repr: Cow::from("123"),
-                        value: NumberValue::Integer(123)
-                    })
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("123%"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Percentage(Number {
-                        repr: Cow::from("123"),
-                        value: NumberValue::Integer(123)
-                    })
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("123px"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Dimension {
-                        value: Number {
-                            repr: Cow::from("123"),
-                            value: NumberValue::Integer(123)
-                        },
-                        unit: Cow::from("px")
-                    }
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("123em"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Dimension {
-                        value: Number {
-                            repr: Cow::from("123"),
-                            value: NumberValue::Integer(123)
-                        },
-                        unit: Cow::from("em")
-                    }
-                );
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("123e+10em"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Dimension {
-                        value: Number {
-                            repr: Cow::from("123e+10"),
-                            value: NumberValue::Number(123e+10)
-                        },
-                        unit: Cow::from("em")
-                    }
-                );
-            });
-        }
-
-        #[test]
-        fn dash_ident() {
-            smol::block_on(async move {
-                let mut tokenizer = AsyncTokenizer::new(stream!("-h"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Ident(Cow::from("-h")));
-
-                let mut tokenizer = AsyncTokenizer::new(stream!("--"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Ident(Cow::from("--")));
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("-\\_"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Ident(Cow::from("-_")));
-            });
-        }
-
-        #[test]
-        fn html_comment() {
-            smol::block_on(async move {
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("-->"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::CDC);
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("<!--"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::CDO);
-
-                let mut tokenizer = AsyncTokenizer::new(stream!("<"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Delim('<'));
-            });
-        }
-
-        #[test]
-        fn at_keyword() {
-            smol::block_on(async move {
-                let mut tokenizer = AsyncTokenizer::new(stream!("@"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Delim('@'));
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("@import"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::AtKeyword(Cow::from("import"))
-                );
-            });
-        }
-
-        #[test]
-        fn ident_like() {
-            smol::block_on(async move {
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("url("), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Url(Cow::from("")));
-
-                let mut tokenizer = AsyncTokenizer::new(
-                    stream!("url(https://example.com"),
-                    TokenizerOptions::default(),
-                );
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Url(Cow::from("https://example.com"))
-                );
-
-                let mut tokenizer = AsyncTokenizer::new(
-                    stream!("url(https://example.com)"),
-                    TokenizerOptions::default(),
-                );
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::Url(Cow::from("https://example.com"))
-                );
-
-                let mut tokenizer = AsyncTokenizer::new(
-                    stream!("url(\"https://example.com\")"),
-                    TokenizerOptions::default(),
-                );
-                assert_eq!(tokenizer.consume().await, Token::Function(Cow::from("url")));
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("rgb(128 92 255)"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Function(Cow::from("rgb")));
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("hello"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Ident(Cow::from("hello")));
-
-                let mut tokenizer = AsyncTokenizer::new(stream!("*"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Delim('*'));
-            });
-        }
-
-        #[test]
-        fn escape() {
-            smol::block_on(async move {
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("\\unk"), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Ident(Cow::from("unk")));
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("\\unk("), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Function(Cow::from("unk")));
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("\\url("), TokenizerOptions::default());
-                assert_eq!(tokenizer.consume().await, Token::Url(Cow::from("")));
-
-                let mut tokenizer =
-                    AsyncTokenizer::new(stream!("@import"), TokenizerOptions::default());
-                assert_eq!(
-                    tokenizer.consume().await,
-                    Token::AtKeyword(Cow::from("import"))
-                );
-            });
         }
     }
 }

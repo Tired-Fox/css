@@ -2,12 +2,7 @@
     {
         "name": "single backslash parse error",
         "input": "\\",
-        "output": [
-            {
-                "type": "delim",
-                "value": "\\"
-            }
-        ],
+        "output": [{ "type": "delim", "value": "\\" }],
         "parse_errors": true
     }
 ]
