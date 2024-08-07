@@ -36,6 +36,7 @@ pub const Parser = struct {
                 0x0C => 0x0A,
                 0x0D => {
                     if (self.stream.peek(1)[0] == 0x0A) {
+                        self.location += 1;
                         _ = self.stream.nextCodepoint();
                     }
                     return 0x0A;
