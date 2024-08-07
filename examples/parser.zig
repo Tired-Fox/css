@@ -6,7 +6,10 @@ pub fn main() !void {
     var parser = try css.Parser.init(s);
 
     var buffer: [4]u8 = undefined;
+    var location: usize = 0;
     while (try parser.nextSlice(&buffer)) |read| {
-        std.debug.print("{s}", .{buffer[0..read]});
+        const l = parser.loc();
+        std.debug.print("{s} [{d}..{d}]\n", .{ buffer[0..read], location, l });
+        location = l;
     }
 }
